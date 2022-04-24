@@ -15,9 +15,12 @@ import pyAesCrypt
 import utils.dcm_np_converter as rescale
 from utils import Functions
 from utils import visualize_stl as stl
+import requests
 
 def check_available_servers(args):
-    server_list = ['ws1.joshuachou.ink','10.222.110.2','github.com']
+    print(f'[+] retrieving server list')
+    response = requests.get('https://raw.githubusercontent.com/JoshuaChou2018/LungClient/main/server_list.update')
+    server_list = response.text.split('\n')
     response_list = []
     for host in server_list:
         try:
@@ -45,6 +48,7 @@ def run_online_inference(args):
     upload_file_path = f'{temp_save_dir}/{temp_file_name}.npy'
     encrypted_upload_file_path = upload_file_path + '.enc'
     processed_file_path = f'{temp_save_dir}/{temp_file_name}.processed.npy.gz'
+    encrypted_processed_file_path = processed_file_path + '.enc'
     upload_file_name = upload_file_path.split('/')[-1]
     upload_file_namebody = upload_file_name.rstrip('.')[0]
     server = args.server
@@ -55,90 +59,106 @@ def run_online_inference(args):
             key = [x.rstrip('\n') for x in key]
         return ''.join(key)
 
-    # 下面是主要运行模块
-
     start_time = time.time()
 
     if os.path.isdir(temp_save_dir) == False:
         os.makedirs(temp_save_dir)
 
     # process data
-    print(f'[+] process original ct data to rescaled_ct with shape (512,512,512)')
+    print(f'[+] processing original ct data to rescaled_ct with shape (512,512,512)')
     rescaled_ct = rescale.dcm_to_spatial_signal_rescaled(dict_dcm, (-600, 1600))
-    print(f'[+] rescaled_ct has shape {rescaled_ct.shape}')
+    print(f'[+] rescaled_ct has shape {rescaled_ct.shape}, saving it now')
     with open(upload_file_path, 'wb') as f:
         np.save(f, rescaled_ct)
     print(f'[+] saved rescaled_ct to {upload_file_path}')
 
     # encryption
-    print(f'[+] encrypting data with private key to {upload_file_path}.enc')
-    print(f'[+] reading private key')
+    print(f'[+] reading private key @{private_key_path}')
+    print(f'[+] encrypting data with private key @{private_key_path} to file {upload_file_path}.enc')
     private_key = read_pem(private_key_path)
     pyAesCrypt.encryptFile(upload_file_path, encrypted_upload_file_path, private_key)
+    print(f'[+] encryption finished')
 
-    print(f'[+] upload rescaled_ct @{encrypted_upload_file_path} to server for inferring (this step takes long)')
+    complete_server = f'http://{server}:5000/lung'
+    print(f'[+] waiting to upload rescaled_ct @{encrypted_upload_file_path} to server {complete_server} for online inference (this step takes long, but should be no longer than 10 mins)')
     # test_response, status = requests.post('http://ws1.joshuachou.ink:5000/lung', files =[("ct", open("temp/test.npy.gz", "rb"))])
-    response = requests.post(f'http://{server}:5000/lung',
+    response = requests.post(complete_server,
                              files=[("ct", open(encrypted_upload_file_path, "rb")),
                                     ('public_key', open(public_key_path, "rb"))])
 
-    print(response)
+    status_code = response.status_code
+    print(f'[+] received response from the server, checking the response')
 
-    print('[+] received processed result from server')
-    with open(f'{processed_file_path}', 'wb') as w:
-        w.write(response.content)
-    print(f'[+] save results to {processed_file_path}')
+    if status_code == 200:
+        try:
+            response_json = response.json()
+            print(f'[+] job rejected due to {response_json}')
+        except:
+            print('[+] received encrypted processed result from server')
+            with open(f'{encrypted_processed_file_path}', 'wb') as w:
+                w.write(response.content)
+            print(f'[+] saved results to {encrypted_processed_file_path}')
 
-    # load processed data
-    print(f'[+] post-processing result @{processed_file_path} from server')
-    load_path = os.path.join(f'{processed_file_path}')
-    f = gzip.GzipFile(load_path, "r")
-    tissue_seg_list = np.load(f)
-    print(f'[+] processed data with shape {tissue_seg_list.shape}')
+            # decrypt the processed result
+            print(f'[+] decrypt the processed result to {processed_file_path}')
+            pyAesCrypt.decryptFile(encrypted_processed_file_path, processed_file_path, private_key)
 
-    print('[+] rescale results')
+            # load processed data
+            print(f'[+] post-processing result @{processed_file_path} from server')
+            load_path = os.path.join(f'{processed_file_path}')
+            f = gzip.GzipFile(load_path, "r")
+            tissue_seg_list = np.load(f)
+            print(f'[+] processed segmentation result with shape {tissue_seg_list.shape}')
 
-    lung_original = rescale.undo_spatial_rescale(dict_dcm, tissue_seg_list[0])
-    heart_original = rescale.undo_spatial_rescale(dict_dcm, tissue_seg_list[1])
-    blood_original = rescale.undo_spatial_rescale(dict_dcm, tissue_seg_list[2])
-    airway_original = rescale.undo_spatial_rescale(dict_dcm, tissue_seg_list[3])
-    nodule_original = rescale.undo_spatial_rescale(dict_dcm, tissue_seg_list[4])
+            print('[+] rescaling results to original shape')
 
-    if len(file_name) > 4 and file_name[-4] == '.':
-        file_name = file_name[:-4]
+            lung_original = rescale.undo_spatial_rescale(dict_dcm, tissue_seg_list[0])
+            heart_original = rescale.undo_spatial_rescale(dict_dcm, tissue_seg_list[1])
+            blood_original = rescale.undo_spatial_rescale(dict_dcm, tissue_seg_list[2])
+            airway_original = rescale.undo_spatial_rescale(dict_dcm, tissue_seg_list[3])
+            nodule_original = rescale.undo_spatial_rescale(dict_dcm, tissue_seg_list[4])
 
-    resolution_original = rescale.get_original_resolution(dict_dcm)
+            if len(file_name) > 4 and file_name[-4] == '.':
+                file_name = file_name[:-4]
 
-    print('[+] save results to mha format')
+            resolution_original = rescale.get_original_resolution(dict_dcm)
 
-    Functions.save_np_as_mha(lung_original, dict_save_final, 'lung_' + file_name, spacing=resolution_original)
-    Functions.save_np_as_mha(heart_original, dict_save_final, 'heart_' + file_name, spacing=resolution_original)
-    Functions.save_np_as_mha(blood_original, dict_save_final, 'blood-vessel_' + file_name,
-                                 spacing=resolution_original)
-    Functions.save_np_as_mha(airway_original, dict_save_final, 'airway_' + file_name, spacing=resolution_original)
-    Functions.save_np_as_mha(nodule_original, dict_save_final, 'nodule_' + file_name, spacing=resolution_original)
+            print('[+] saving results to mha format')
 
-    print('[+] save results to stl format')
+            Functions.save_np_as_mha(lung_original, dict_save_final, 'lung_' + file_name, spacing=resolution_original)
+            Functions.save_np_as_mha(heart_original, dict_save_final, 'heart_' + file_name, spacing=resolution_original)
+            Functions.save_np_as_mha(blood_original, dict_save_final, 'blood-vessel_' + file_name,
+                                         spacing=resolution_original)
+            Functions.save_np_as_mha(airway_original, dict_save_final, 'airway_' + file_name, spacing=resolution_original)
+            Functions.save_np_as_mha(nodule_original, dict_save_final, 'nodule_' + file_name, spacing=resolution_original)
 
-    stl.convert_mha_to_stl(os.path.join(dict_save_final, 'lung_' + file_name + '.mha'),
-                               os.path.join(dict_save_final, 'lung_' + file_name + '.stl'))
-    stl.convert_mha_to_stl(os.path.join(dict_save_final, 'heart_' + file_name + '.mha'),
-                               os.path.join(dict_save_final, 'heart_' + file_name + '.stl'))
-    stl.convert_mha_to_stl(os.path.join(dict_save_final, 'blood-vessel_' + file_name + '.mha'),
-                               os.path.join(dict_save_final, 'blood-vessel_' + file_name + '.stl'))
-    stl.convert_mha_to_stl(os.path.join(dict_save_final, 'airway_' + file_name + '.mha'),
-                               os.path.join(dict_save_final, 'airway_' + file_name + '.stl'))
-    stl.convert_mha_to_stl(os.path.join(dict_save_final, 'nodule_' + file_name + '.mha'),
-                               os.path.join(dict_save_final, 'nodule_' + file_name + '.stl'))
+            print('[+] saving results to stl format')
 
+            stl.convert_mha_to_stl(os.path.join(dict_save_final, 'lung_' + file_name + '.mha'),
+                                       os.path.join(dict_save_final, 'lung_' + file_name + '.stl'))
+            stl.convert_mha_to_stl(os.path.join(dict_save_final, 'heart_' + file_name + '.mha'),
+                                       os.path.join(dict_save_final, 'heart_' + file_name + '.stl'))
+            stl.convert_mha_to_stl(os.path.join(dict_save_final, 'blood-vessel_' + file_name + '.mha'),
+                                       os.path.join(dict_save_final, 'blood-vessel_' + file_name + '.stl'))
+            stl.convert_mha_to_stl(os.path.join(dict_save_final, 'airway_' + file_name + '.mha'),
+                                       os.path.join(dict_save_final, 'airway_' + file_name + '.stl'))
+            stl.convert_mha_to_stl(os.path.join(dict_save_final, 'nodule_' + file_name + '.mha'),
+                                       os.path.join(dict_save_final, 'nodule_' + file_name + '.stl'))
 
-    print(f'[+] final segmentation result saved to {dict_save_final}')
+            print(f'[+] saved final results to {dict_save_final}')
 
-    print('[+] finish all job')
+            print(f'[+] job finished')
 
-    os.remove(upload_file_path)
-    os.remove(encrypted_upload_file_path)
-    os.remove(processed_file_path)
+    elif status_code == 500:
+
+        print(response.text)
+
+    try:
+        os.remove(upload_file_path)
+        os.remove(encrypted_upload_file_path)
+        os.remove(processed_file_path)
+    except:
+        pass
 
     print(f'[+] cleaning temp files @{upload_file_path} @{encrypted_upload_file_path} @{processed_file_path}')
     print(f"[+] total time: {time.time() - start_time} s")
