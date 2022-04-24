@@ -1,3 +1,11 @@
+### Check all avaliable servers
+
+```
+python run.py server
+```
+
+### Online inference
+
 ```
 python run.py run \
 --server ws1.joshuachou.ink \

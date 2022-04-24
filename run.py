@@ -80,7 +80,7 @@ def run_online_inference(args):
     print(f'[+] encryption finished')
 
     complete_server = f'http://{server}:5000/lung'
-    print(f'[+] waiting to upload rescaled_ct @{encrypted_upload_file_path} to server {complete_server} for online inference (this step takes long, but should be no longer than 10 mins)')
+    print(f'[+] uploaded rescaled_ct @{encrypted_upload_file_path} to server {complete_server}, waiting for online inference (this step takes long, but should be no longer than 10 mins)')
     # test_response, status = requests.post('http://ws1.joshuachou.ink:5000/lung', files =[("ct", open("temp/test.npy.gz", "rb"))])
     response = requests.post(complete_server,
                              files=[("ct", open(encrypted_upload_file_path, "rb")),
