@@ -1,3 +1,9 @@
+### Build environment
+
+```
+conda env create -f environment.yml
+```
+
 ### Check all avaliable servers
 
 ```
